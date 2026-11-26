@@ -20,6 +20,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEvent
+import androidx.compose.ui.input.key.isCtrlPressed
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.type
@@ -191,6 +193,11 @@ private fun ChatComposerFor(
     }
     // AgentInput handleKeyPress: with no suggestions up, Escape stops a busy agent.
     val canEscape = showAbort && sessionState != SessionState.Disconnected && metadata.rigCanAbort()
+    fun send() {
+        haptics.light()
+        stopRequested = false
+        actions.onSend(draft)
+    }
     ChatComposer(
         text = draft,
         onTextChange = actions.onDraftChange,
@@ -208,11 +215,7 @@ private fun ChatComposerFor(
                     haptics.error()
                     scope.launch { panelShake.shake() }
                 }
-                PrimaryAction.Send -> {
-                    haptics.light()
-                    stopRequested = false
-                    actions.onSend(draft)
-                }
+                PrimaryAction.Send -> send()
                 PrimaryAction.Idle -> Unit
                 PrimaryAction.Voice -> { haptics.light(); voiceAction?.invoke() }
             }
@@ -237,7 +240,14 @@ private fun ChatComposerFor(
         overlay = { ComposerSuggestions(autocomplete) },
         cursor = autocomplete.cursor,
         onKey = { event ->
-            (event.key == Key.Escape && canEscape && !aborting).also { if (it && event.type == KeyEventType.KeyDown) abort() }
+            when {
+                event.isCtrlSendKey() -> {
+                    // Ctrl+Enter sends, like the Send button; the key is eaten either way.
+                    if (event.type == KeyEventType.KeyDown && primary == PrimaryAction.Send) send()
+                    true
+                }
+                else -> (event.key == Key.Escape && canEscape && !aborting).also { if (it && event.type == KeyEventType.KeyDown) abort() }
+            }
         },
         panelShake = panelShake,
         primaryShake = primaryShake,
@@ -253,6 +263,10 @@ private fun ChatComposerFor(
         },
     )
 }
+
+/** Ctrl+Enter (either Enter key) from a hardware keyboard. */
+internal fun KeyEvent.isCtrlSendKey(): Boolean =
+    isCtrlPressed && (key == Key.Enter || key == Key.NumPadEnter)
 
 /** AgentInput.tsx: Stop's spinner shows at least this long. */
 private const val ABORT_MIN_SPINNER_MS = 300L
