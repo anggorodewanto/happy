@@ -192,6 +192,8 @@ class ReducerState(private val now: () -> Long = System::currentTimeMillis) {
         // Notifications wait for Phase 2 so a tool call in this batch starts its
         // task before the notification that ends it is applied.
         val notifications = ArrayList<Pair<BackgroundTaskNotification, Long>>()
+        // Live SDK task events also apply after a call in this batch has started a task.
+        val taskEvents = ArrayList<Pair<BackgroundTaskEvent, Long>>()
         for (msg in nonSidechain) {
             val body = msg.body
             if (body is Body.User && msg.localId != null && msg.localId in localIds) {
@@ -206,6 +208,7 @@ class ReducerState(private val now: () -> Long = System::currentTimeMillis) {
             }
             if (msg.id in messageIds) continue
             for (notification in msg.taskNotifications) notifications.add(notification to msg.createdAt)
+            for (event in msg.taskEvents) taskEvents.add(event to msg.createdAt)
             if (body is Body.Control) {
                 // Background-task notifications alone: nothing to draw.
                 messageIds[msg.id] = msg.id
@@ -538,6 +541,9 @@ class ReducerState(private val now: () -> Long = System::currentTimeMillis) {
         //
         // A started call (above) is joined here by the notification that ends
         // it; a notification with no task to join adds a finished one of its own.
+        // Live SDK events are applied first: they name their task exactly, and
+        // the heuristics below fall back to them when a CLI sends no live data.
+        for ((event, at) in taskEvents) backgroundTaskTracker.live(event, at)
         for ((notification, at) in notifications) backgroundTaskTracker.notify(notification, at)
 
         //

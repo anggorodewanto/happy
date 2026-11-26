@@ -4,6 +4,8 @@ import type { RawJSONLines } from '@/claude/types';
 import {
     createEnvelope,
     type SessionEnvelope,
+    type SessionTaskEvent,
+    type SessionTaskStatus,
     type SessionUsage,
     type SessionTurnEndStatus,
 } from '@slopus/happy-wire';
@@ -18,6 +20,10 @@ export type ClaudeSessionProtocolState = {
     hiddenParentToolCalls?: Set<string>;
     startedSubagents?: Set<string>;
     activeSubagents?: Set<string>;
+    /** When each task's last `task_progress` envelope went out, for its throttle. */
+    taskProgressSentAt?: Map<string, number>;
+    /** Progress held back by the throttle, so the last one can follow a status change. */
+    pendingTaskProgress?: Map<string, { envelope: SessionEnvelope; at: number }>;
 };
 
 type ClaudeMapperResult = {
@@ -447,6 +453,217 @@ function attachUsageToLastEnvelope(
     }
 }
 
+/** At most one `task_progress` envelope per task per this interval, so the relay is not flooded. */
+const TASK_PROGRESS_MIN_INTERVAL_MS = 5_000;
+
+const TASK_STATUSES: ReadonlySet<string> = new Set([
+    'pending',
+    'running',
+    'completed',
+    'failed',
+    'killed',
+    'paused',
+    'stopped',
+    'cancelled',
+]);
+
+function getTaskProgressSentAt(state: ClaudeSessionProtocolState): Map<string, number> {
+    if (!state.taskProgressSentAt) {
+        state.taskProgressSentAt = new Map<string, number>();
+    }
+    return state.taskProgressSentAt;
+}
+
+function getPendingTaskProgress(state: ClaudeSessionProtocolState): Map<string, { envelope: SessionEnvelope; at: number }> {
+    if (!state.pendingTaskProgress) {
+        state.pendingTaskProgress = new Map<string, { envelope: SessionEnvelope; at: number }>();
+    }
+    return state.pendingTaskProgress;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+        ? value as Record<string, unknown>
+        : undefined;
+}
+
+function firstString(...values: unknown[]): string | undefined {
+    for (const value of values) {
+        if (typeof value === 'string' && value.trim().length > 0) {
+            return value;
+        }
+    }
+    return undefined;
+}
+
+function taskNumber(value: unknown): number | undefined {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+function taskStatus(value: unknown): SessionTaskStatus | undefined {
+    return typeof value === 'string' && TASK_STATUSES.has(value) ? value as SessionTaskStatus : undefined;
+}
+
+function taskUsage(value: unknown): { totalTokens?: number; toolUses?: number; durationMs?: number } | undefined {
+    const usage = asRecord(value);
+    if (!usage) {
+        return undefined;
+    }
+    const totalTokens = taskNumber(usage.total_tokens);
+    const toolUses = taskNumber(usage.tool_uses);
+    const durationMs = taskNumber(usage.duration_ms);
+    if (totalTokens === undefined && toolUses === undefined && durationMs === undefined) {
+        return undefined;
+    }
+    return {
+        ...(totalTokens !== undefined ? { totalTokens } : {}),
+        ...(toolUses !== undefined ? { toolUses } : {}),
+        ...(durationMs !== undefined ? { durationMs } : {}),
+    };
+}
+
+function throttleTaskProgress(
+    state: ClaudeSessionProtocolState,
+    envelopes: SessionEnvelope[],
+    taskId: string,
+    event: Omit<SessionTaskEvent, 't'>,
+): void {
+    const now = Date.now();
+    const sentAt = getTaskProgressSentAt(state).get(taskId);
+    if (sentAt === undefined || now - sentAt >= TASK_PROGRESS_MIN_INTERVAL_MS) {
+        envelopes.push(createEnvelope('agent', { t: 'task', ...event }, { time: now }));
+        getTaskProgressSentAt(state).set(taskId, now);
+        getPendingTaskProgress(state).delete(taskId);
+        return;
+    }
+    // Held back, replacing the previous held one: the last progress before a
+    // status change is flushed first by `flushPendingTaskProgress`.
+    getPendingTaskProgress(state).set(taskId, {
+        envelope: createEnvelope('agent', { t: 'task', ...event }, { time: now }),
+        at: now,
+    });
+}
+
+function flushPendingTaskProgress(
+    state: ClaudeSessionProtocolState,
+    envelopes: SessionEnvelope[],
+    taskId: string,
+): void {
+    const pending = getPendingTaskProgress(state);
+    const held = pending.get(taskId);
+    if (!held) {
+        return;
+    }
+    pending.delete(taskId);
+    envelopes.push(held.envelope);
+    getTaskProgressSentAt(state).set(taskId, held.at);
+}
+
+function flushAllPendingTaskProgress(
+    state: ClaudeSessionProtocolState,
+    envelopes: SessionEnvelope[],
+): void {
+    for (const taskId of [...getPendingTaskProgress(state).keys()]) {
+        flushPendingTaskProgress(state, envelopes, taskId);
+    }
+}
+
+/**
+ * The Claude Agent SDK's background-task system messages, forwarded as the
+ * additive `task` event. Every other system message stays dropped. The app
+ * gets `started`/`updated`/`notification` in order, and at most one
+ * `progress` per task per 5 s (the last one always follows a status change).
+ */
+function mapTaskSystemMessage(
+    message: RawJSONLines,
+    state: ClaudeSessionProtocolState,
+    envelopes: SessionEnvelope[],
+): void {
+    const raw = message as unknown as Record<string, unknown>;
+    const subtype = typeof raw.subtype === 'string' ? raw.subtype : undefined;
+    if (subtype !== 'task_started' && subtype !== 'task_progress' && subtype !== 'task_updated' && subtype !== 'task_notification') {
+        return;
+    }
+
+    const taskId = firstString(raw.task_id, raw.taskId);
+    if (!taskId) {
+        return;
+    }
+    const toolUseId = firstString(raw.tool_use_id, raw.toolUseId);
+
+    if (subtype === 'task_started') {
+        flushPendingTaskProgress(state, envelopes, taskId);
+        const description = firstString(raw.description);
+        const taskType = firstString(raw.task_type, raw.subagent_type);
+        const isBackgrounded = typeof raw.is_backgrounded === 'boolean' ? raw.is_backgrounded : undefined;
+        envelopes.push(createEnvelope('agent', {
+            t: 'task',
+            phase: 'started',
+            taskId,
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(description ? { description } : {}),
+            ...(taskType ? { taskType } : {}),
+            ...(isBackgrounded !== undefined ? { isBackgrounded } : {}),
+        }));
+        return;
+    }
+
+    if (subtype === 'task_progress') {
+        const description = firstString(raw.description);
+        const summary = firstString(raw.summary);
+        const lastToolName = firstString(raw.last_tool_name, raw.lastToolName);
+        const usage = taskUsage(raw.usage);
+        throttleTaskProgress(state, envelopes, taskId, {
+            phase: 'progress',
+            taskId,
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(description ? { description } : {}),
+            ...(summary ? { summary } : {}),
+            ...(lastToolName ? { lastToolName } : {}),
+            ...(usage ? { usage } : {}),
+        });
+        return;
+    }
+
+    if (subtype === 'task_updated') {
+        flushPendingTaskProgress(state, envelopes, taskId);
+        const patch = asRecord(raw.patch) ?? {};
+        const description = firstString(patch.description, raw.description);
+        const status = taskStatus(patch.status);
+        const isBackgrounded = typeof patch.is_backgrounded === 'boolean'
+            ? patch.is_backgrounded
+            : typeof raw.is_backgrounded === 'boolean'
+                ? raw.is_backgrounded
+                : undefined;
+        envelopes.push(createEnvelope('agent', {
+            t: 'task',
+            phase: 'updated',
+            taskId,
+            ...(toolUseId ? { toolUseId } : {}),
+            ...(description ? { description } : {}),
+            ...(status ? { status } : {}),
+            ...(isBackgrounded !== undefined ? { isBackgrounded } : {}),
+        }));
+        return;
+    }
+
+    flushPendingTaskProgress(state, envelopes, taskId);
+    const status = taskStatus(raw.status);
+    const summary = firstString(raw.summary);
+    const outputFile = firstString(raw.output_file, raw.outputFile);
+    const usage = taskUsage(raw.usage);
+    envelopes.push(createEnvelope('agent', {
+        t: 'task',
+        phase: 'notification',
+        taskId,
+        ...(toolUseId ? { toolUseId } : {}),
+        ...(status ? { status } : {}),
+        ...(summary ? { summary } : {}),
+        ...(outputFile ? { outputFile } : {}),
+        ...(usage ? { usage } : {}),
+    }));
+}
+
 function closeTurn(
     state: ClaudeSessionProtocolState,
     status: SessionTurnEndStatus,
@@ -487,6 +704,7 @@ export function closeClaudeTurnWithStatus(
     status: SessionTurnEndStatus,
 ): ClaudeMapperResult {
     const envelopes: SessionEnvelope[] = [];
+    flushAllPendingTaskProgress(state, envelopes);
     closeTurn(state, status, envelopes);
     return {
         currentTurnId: state.currentTurnId,
@@ -529,6 +747,7 @@ function mapClaudeLogMessageToSessionEnvelopesInternal(
     }
 
     if (message.type === 'system') {
+        mapTaskSystemMessage(message, state, envelopes);
         return {
             currentTurnId: state.currentTurnId,
             envelopes,

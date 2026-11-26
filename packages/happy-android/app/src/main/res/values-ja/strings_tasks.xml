@@ -11,5 +11,9 @@
     <string name="chat_tasks_status_completed">完了</string>
     <string name="chat_tasks_status_failed">失敗</string>
     <string name="chat_tasks_status_cancelled">キャンセル済み</string>
+    <string name="chat_tasks_status_ended_with_session">セッション終了時に終了</string>
     <string name="chat_tasks_status_time">%1$s · %2$s</string>
+    <plurals name="chat_tasks_tool_uses">
+        <item quantity="other">%1$d 回のツール使用</item>
+    </plurals>
 </resources>

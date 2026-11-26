@@ -80,6 +80,7 @@ internal sealed interface SessionEvent {
     data object Stop : SessionEvent
     data class Accepted(val ref: String) : SessionEvent
     data class Rejected(val ref: String, val reason: String) : SessionEvent
+    data class Task(val event: BackgroundTaskEvent) : SessionEvent
 
     companion object {
         private val TURN_END_STATUSES = setOf("completed", "failed", "cancelled")
@@ -124,7 +125,32 @@ internal sealed interface SessionEvent {
                 if (ev["id"].str == null || ev["runId"].str == null) null else Accepted(ev["ref"].str ?: return null)
             }
             "user-message-rejected" -> Rejected(ev["ref"].str ?: return null, ev["reason"].str ?: return null)
+            "task" -> parseTask(ev)
             else -> null
+        }
+
+        /** The additive `task` event; unknown phases are dropped like any unknown event. */
+        private fun parseTask(ev: JsonObject): SessionEvent? {
+            val phase = BackgroundTaskPhase.of(ev["phase"].str) ?: return null
+            val taskId = ev["taskId"].str?.takeIf { it.isNotEmpty() } ?: return null
+            val usage = ev["usage"].obj
+            return Task(
+                BackgroundTaskEvent(
+                    phase = phase,
+                    taskId = taskId,
+                    toolUseId = ev["toolUseId"].str,
+                    description = ev["description"].str,
+                    status = ev["status"].str,
+                    summary = ev["summary"].str,
+                    lastToolName = ev["lastToolName"].str,
+                    outputFile = ev["outputFile"].str,
+                    taskType = ev["taskType"].str,
+                    isBackgrounded = ev["isBackgrounded"]?.bool,
+                    totalTokens = usage?.get("totalTokens")?.long,
+                    toolUses = usage?.get("toolUses")?.long,
+                    durationMs = usage?.get("durationMs")?.long,
+                ),
+            )
         }
     }
 }

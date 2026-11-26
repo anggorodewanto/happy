@@ -21,6 +21,8 @@ data class NormalizedMessage(
     val author: SessionAuthor? = null,
     /** Background-task notifications this record carried; never drawn as a row. */
     val taskNotifications: List<BackgroundTaskNotification> = emptyList(),
+    /** Live background-task events this record carried; never drawn as a row. */
+    val taskEvents: List<BackgroundTaskEvent> = emptyList(),
 ) {
     sealed interface Body {
         data class User(val text: String) : Body

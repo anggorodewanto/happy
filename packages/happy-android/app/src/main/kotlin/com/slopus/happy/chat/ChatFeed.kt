@@ -256,6 +256,19 @@ data class ChatState(
 ) {
     val sessionState: SessionState get() = resolveSessionState(session?.agentState, thinking, online)
     val pendingCommunications: List<PendingAgentCommunication> get() = selectPendingCommunications(session?.agentState)
+
+    /**
+     * The session's background tasks as the chat shows them. A task still
+     * running once its Happy CLI is gone (a disconnected, offline or archived
+     * session) reads as ended with the session, so no stale "N running" pill
+     * outlives it.
+     */
+    val backgroundTasks: List<BackgroundTask>
+        get() = if (session?.isRig == false && sessionState == SessionState.Disconnected) {
+            snapshot.backgroundTasks.map { it.endedWithSession() }
+        } else {
+            snapshot.backgroundTasks
+        }
 }
 
 /** The chat's state for one session, reduced on [Dispatchers.Default]. */

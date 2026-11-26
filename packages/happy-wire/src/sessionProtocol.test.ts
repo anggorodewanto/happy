@@ -35,6 +35,16 @@ describe('session protocol schemas', () => {
       { t: 'start', title: 'Research agent' },
       { t: 'turn-end', status: 'completed' },
       { t: 'stop' },
+      {
+        t: 'task',
+        phase: 'notification',
+        taskId: 'task-1',
+        toolUseId: 'toolu-1',
+        status: 'completed',
+        summary: 'Background command "npm run build" completed',
+        outputFile: '/tmp/task-1.output',
+        usage: { totalTokens: 900, toolUses: 12, durationMs: 83_000 },
+      },
     ];
 
     for (const event of events) {
@@ -51,6 +61,9 @@ describe('session protocol schemas', () => {
     expect(sessionEventSchema.safeParse({ t: 'start', title: 1 }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'service' }).success).toBe(false);
     expect(sessionEventSchema.safeParse({ t: 'not-real' }).success).toBe(false);
+    expect(sessionEventSchema.safeParse({ t: 'task', phase: 'started' }).success).toBe(false);
+    expect(sessionEventSchema.safeParse({ t: 'task', phase: 'teleported', taskId: 'task-1' }).success).toBe(false);
+    expect(sessionEventSchema.safeParse({ t: 'task', phase: 'updated', taskId: 'task-1', status: 'nope' }).success).toBe(false);
   });
 
   it('validates envelopes that include turn/subagent', () => {

@@ -2209,24 +2209,36 @@ in `chat/BackgroundTasks.kt`, `ReducerState.backgroundTasks` →
 `ChatSnapshot.backgroundTasks`). It is read-only: the CLI answers no
 per-task stop, only the whole turn's abort.
 
-happy-cli sends no session envelope for the Claude Agent SDK's
-`task_started` / `task_progress` / `task_notification` system messages (its
-`sessionProtocolMapper` drops every `system` message), so nothing arrives
-live. What does arrive is the tool call that started a task — its input says
-`run_in_background`, with the command and description (the CLI hides a
-`Task` call's parent, so a `Task` subagent's start is not seen) — and the
-`<task-notification>` envelope Claude Code writes into the conversation when
-the task ends (`happy-wire` controlMessages.ts): task id, status
-(completed / failed / killed…), summary, output file and subagent usage.
-`ChatNormalizer` keeps the envelope as `NormalizedMessage.taskNotifications`
-and draws no row for a record that only carried it. A notification is joined
-to its call by the description its summary quotes (the CLI cuts a tool title
-at 77 characters, so a long prefix counts); with nothing quoted and one task
-alone running, that task is taken as the one it ends; with nothing to join it
-is listed as finished on its own, without a start time or command — a
-subagent whose `Task` call the CLI hid, or a session opened after the task
-started. There is no progress, then, and no stop. Words are in
-`strings_tasks.xml`.
+happy-cli forwards the Claude Agent SDK's `task_started` / `task_progress` /
+`task_updated` / `task_notification` system messages as an additive `task`
+session event (`sessionProtocolMapper.ts`, `happy-wire` `sessionTaskEventSchema`):
+`{t: 'task', phase, taskId, toolUseId?, description?, status?, summary?,
+lastToolName?, usage?, outputFile?, taskType?, isBackgrounded?}`. Progress is
+throttled to one event per task per 5 s, and the last held progress always
+follows a status change. `ChatNormalizer` keeps it as
+`NormalizedMessage.taskEvents` and draws no row. The app joins a live
+`started` to the call's `call:<id>` task by `toolUseId` (else to `task:<taskId>`),
+fills `progress` / `lastToolName` / `totalTokens` / `toolUses` / `durationMs`
+from `progress`, and ends the task from `updated` / `notification`. Live events
+win over the fallback.
+
+The fallback, for a CLI before that forwarding, is the tool call that started a
+task — its input says `run_in_background`, with the command and description
+(the CLI hides a `Task` call's parent, so a `Task` subagent's start is not seen)
+— and the `<task-notification>` envelope Claude Code writes into the
+conversation when the task ends (`happy-wire` controlMessages.ts): task id,
+status (completed / failed / killed…), summary, output file and subagent usage.
+A notification is joined to its call by the description its summary quotes
+(the CLI cuts a tool title at 77 characters, so a long prefix counts); with
+nothing quoted and one task alone running, that task is taken as the one it
+ends; with nothing to join it is listed as finished on its own, without a start
+time or command — a subagent whose `Task` call the CLI hid, or a session opened
+after the task started. There is no progress, then, and no stop.
+
+A task still running once its session's CLI is gone (the chat reads
+`SessionState.Disconnected`: inactive, offline or archived) is shown ended,
+with "Ended with session", so no stale "N running" pill outlives the CLI
+(`ChatState.backgroundTasks`). Words are in `strings_tasks.xml`.
 
 ### One-row composer
 

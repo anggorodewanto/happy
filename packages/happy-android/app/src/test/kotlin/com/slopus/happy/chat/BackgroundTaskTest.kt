@@ -4,6 +4,7 @@ import com.slopus.happy.chat.NormalizedMessage.Body
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -12,8 +13,9 @@ import org.junit.Test
  * Background tasks of a Happy CLI (relay) session: what the tool call that
  * started one carries (`run_in_background`), what Claude Code's
  * `<task-notification>` envelope says when it ends, and how the reducer joins
- * the two. The CLI sends no envelope for the SDK's task_started /
- * task_progress system messages, so there is no live progress to test.
+ * the two. The newer live path is tested here too: the SDK's task_started /
+ * task_progress / task_updated / task_notification messages, forwarded by
+ * happy-cli as the `task` event.
  */
 class BackgroundTaskTest {
     private fun notificationText(vararg lines: String) = buildString {
@@ -374,5 +376,153 @@ class BackgroundTaskTest {
         // Should match the single running task as fallback
         val updated = state.backgroundTasks.single()
         assertEquals(BackgroundTaskStatus.Completed, updated.status)
+    }
+
+    private fun taskRecord(id: String, at: Long, event: kotlinx.serialization.json.JsonObject): NormalizedMessage {
+        val envelope = buildJsonObject {
+            put("id", id)
+            put("time", at)
+            put("role", "agent")
+            put("ev", event)
+        }
+        val record = buildJsonObject { put("role", "session"); put("content", envelope) }
+        return ChatNormalizer.normalize(id, null, at, record)!!
+    }
+
+    private fun taskEvent(phase: String, block: kotlinx.serialization.json.JsonObjectBuilder.() -> Unit) = buildJsonObject {
+        put("t", "task")
+        put("phase", phase)
+        block()
+    }
+
+    @Test
+    fun `a live task_started links the call and draws no row`() {
+        val state = ReducerState()
+        state.reduce(startCall(callId = "call-1", at = 100))
+        val started = taskRecord(
+            "t1", 110,
+            taskEvent("started") {
+                put("taskId", "b123")
+                put("toolUseId", "call-1")
+                put("description", "Build the app")
+            },
+        )
+        assertEquals(Body.Control, started.body)
+        assertEquals(BackgroundTaskPhase.Started, started.taskEvents.single().phase)
+        val result = state.reduce(started)
+        assertEquals(emptyList<ChatMessage>(), result.messages)
+
+        val task = state.backgroundTasks.single()
+        assertEquals("call:call-1", task.id)
+        assertEquals("b123", task.taskId)
+        assertEquals("Build the app", task.title)
+        assertTrue(task.isRunning)
+        assertTrue(task.hasLiveUpdates)
+    }
+
+    @Test
+    fun `live progress fills the running task's counters`() {
+        val state = ReducerState()
+        state.reduce(startCall(callId = "call-1", at = 100))
+        state.reduce(taskRecord("t1", 110, taskEvent("started") { put("taskId", "b123"); put("toolUseId", "call-1") }))
+        state.reduce(
+            taskRecord(
+                "t2", 120,
+                taskEvent("progress") {
+                    put("taskId", "b123")
+                    put("summary", "Running the tests")
+                    put("lastToolName", "Bash")
+                    put("usage", buildJsonObject { put("totalTokens", 1200); put("toolUses", 5); put("durationMs", 83000) })
+                },
+            ),
+        )
+
+        val task = state.backgroundTasks.single()
+        assertEquals("Running the tests", task.progress)
+        assertEquals("Bash", task.lastToolName)
+        assertEquals(1200L, task.totalTokens)
+        assertEquals(5L, task.toolUses)
+        assertEquals(83000L, task.durationMs)
+        assertTrue(task.isRunning)
+    }
+
+    @Test
+    fun `live status changes end the task before a notification arrives`() {
+        val state = ReducerState()
+        state.reduce(startCall(callId = "call-1", at = 100))
+        state.reduce(taskRecord("t1", 110, taskEvent("started") { put("taskId", "b123"); put("toolUseId", "call-1") }))
+        state.reduce(taskRecord("t2", 120, taskEvent("progress") { put("taskId", "b123"); put("summary", "Working") }))
+        state.reduce(taskRecord("t3", 130, taskEvent("updated") { put("taskId", "b123"); put("status", "completed") }))
+
+        val task = state.backgroundTasks.single()
+        assertEquals(BackgroundTaskStatus.Completed, task.status)
+        assertEquals(130L, task.finishedAt)
+        assertFalse(task.isRunning)
+    }
+
+    @Test
+    fun `a live notification with no start still lists its task`() {
+        val state = ReducerState()
+        state.reduce(
+            taskRecord(
+                "t1", 200,
+                taskEvent("notification") {
+                    put("taskId", "b999")
+                    put("status", "failed")
+                    put("summary", "Background command \"deploy\" failed")
+                    put("outputFile", "/tmp/b999.output")
+                    put("usage", buildJsonObject { put("toolUses", 2); put("durationMs", 1000) })
+                },
+            ),
+        )
+
+        val task = state.backgroundTasks.single()
+        assertEquals("task:b999", task.id)
+        assertEquals(BackgroundTaskStatus.Failed, task.status)
+        assertEquals(200L, task.finishedAt)
+        assertEquals("/tmp/b999.output", task.outputFile)
+        assertEquals(2L, task.toolUses)
+        assertEquals(1000L, task.durationMs)
+    }
+
+    @Test
+    fun `a live start without a tool-use id merges into the call when its result names it`() {
+        val state = ReducerState()
+        state.reduce(startCall(callId = "call-1", at = 100, input = """{"command":"npm test","description":"Run tests","run_in_background":true}"""))
+        state.reduce(taskRecord("t1", 110, taskEvent("started") { put("taskId", "b123"); put("description", "Run tests") }))
+        assertEquals(2, state.backgroundTasks.size)
+        assertEquals("task:b123", state.backgroundTasks.first { it.taskId == "b123" }.id)
+
+        state.reduce(agentMsg("r1", 120, toolResult("call-1", "Command running in background with ID: b123.")))
+
+        val task = state.backgroundTasks.single()
+        assertEquals("call:call-1", task.id)
+        assertEquals("b123", task.taskId)
+        assertTrue(task.hasLiveUpdates)
+    }
+
+    @Test
+    fun `an unknown task phase is dropped like any unknown envelope`() {
+        val envelope = buildJsonObject {
+            put("id", "t1")
+            put("time", 100)
+            put("role", "agent")
+            put("ev", buildJsonObject { put("t", "task"); put("phase", "teleported"); put("taskId", "b123") })
+        }
+        val record = buildJsonObject { put("role", "session"); put("content", envelope) }
+        assertNull(ChatNormalizer.normalize("t1", null, 100, record))
+    }
+
+    @Test
+    fun `a running task ends with the session, without a made-up end time`() {
+        val running = BackgroundTask("call:a", BackgroundTaskKind.Command, "Build", startedAt = 10)
+        val ended = running.endedWithSession()
+        assertEquals(BackgroundTaskStatus.Cancelled, ended.status)
+        assertTrue(ended.endedWithSession)
+        assertNull(ended.finishedAt)
+        assertFalse(ended.isRunning)
+
+        val finished = running.copy(status = BackgroundTaskStatus.Completed, finishedAt = 20)
+        assertEquals(finished, finished.endedWithSession())
     }
 }
