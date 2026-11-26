@@ -122,6 +122,48 @@ class QuestionLayoutTest {
         assertEquals(listOf("c1" to mapOf("q1" to AgentQuestionAnswer(listOf("Safe")))), sent)
     }
 
+    @Test
+    fun askUserQuestionTakesAWrittenAnswer() {
+        val answers = mutableListOf<PermissionAnswer>()
+        val tool = ToolCall(
+            name = "AskUserQuestion", state = ToolState.Running, input = Json.parseToJsonElement(askInput), createdAt = 0,
+            permission = ToolPermission("r1", PermissionStatus.Pending),
+        )
+        show(ChatMessage.ToolCallMessage("t", 0, tool), MessageCallbacks(onPermission = { a, _ -> answers += a }))
+        // Picking an option, then writing, keeps only the written answer for a one-answer question.
+        rule.onNodeWithText("Red").performClick()
+        rule.node(QuestionTags.CUSTOM).performTextInput("Teal")
+        rule.onNode(hasText("Red") and hasRole(Role.RadioButton)).assertIsNotSelected()
+        rule.node(QuestionTags.SUBMIT).performClick()
+        rule.waitForIdle()
+        assertEquals(Json.parseToJsonElement("""{"answers":{"Which colour?":"Teal"}}"""), answers.single().updatedInput)
+    }
+
+    @Test
+    fun requestUserInputSendsAWrittenAnswerAsCustom() {
+        val state = AgentState.parse(
+            """{"communications":{"c1":{"id":"c1","kind":"form","toolUseId":"call-1","createdAt":1,"form":{"questions":[{"id":"q1","header":"Mode","question":"Pick","options":[{"label":"Fast"},{"label":"Safe"}]}]}}}}""",
+        )
+        val sent = mutableListOf<Pair<String, Map<String, AgentQuestionAnswer>>>()
+        val tool = ToolCall(callId = "call-1", name = "request_user_input", state = ToolState.Running, input = JsonObject(emptyMap()), createdAt = 0)
+        show(ChatMessage.ToolCallMessage("t", 0, tool), MessageCallbacks(onAnswerQuestion = { id, a, _ -> sent += id to a }), state)
+        rule.node(QuestionTags.CUSTOM).performTextInput("Balanced")
+        rule.node(QuestionTags.SUBMIT).performClick()
+        rule.waitForIdle()
+        assertEquals(listOf("c1" to mapOf("q1" to AgentQuestionAnswer(emptyList(), "Balanced"))), sent)
+    }
+
+    @Test
+    fun requestUserInputHidesTheWrittenAnswerWhenNotAllowed() {
+        val state = AgentState.parse(
+            """{"communications":{"c1":{"id":"c1","kind":"form","toolUseId":"call-1","createdAt":1,"form":{"questions":[{"id":"q1","header":"Mode","question":"Pick","allowCustom":false,"options":[{"label":"Fast"}]}]}}}}""",
+        )
+        val tool = ToolCall(callId = "call-1", name = "request_user_input", state = ToolState.Running, input = JsonObject(emptyMap()), createdAt = 0)
+        show(ChatMessage.ToolCallMessage("t", 0, tool), MessageCallbacks(), state)
+        rule.onNodeWithText("Fast").assertExists()
+        rule.onNode(hasTestTag(QuestionTags.CUSTOM)).assertDoesNotExist()
+    }
+
     private val textOnly = PendingAgentCommunication.Form(
         "c2", 1, null,
         listOf(AgentQuestion("q", "Name", "What should it be called?"), AgentQuestion("q2", "Size", "How big?", listOf(AgentQuestionOption("S"), AgentQuestionOption("L")))),

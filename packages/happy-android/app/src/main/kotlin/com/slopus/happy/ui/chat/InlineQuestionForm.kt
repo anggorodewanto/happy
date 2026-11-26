@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -29,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -53,9 +55,11 @@ data class InlineQuestion(
     val options: List<AgentQuestionOption>,
     val multiSelect: Boolean = false,
     val required: Boolean? = null,
+    /** Whether a written answer box shows under the options. */
+    val allowCustom: Boolean = true,
 )
 
-/** Selected option labels by question id. */
+/** Selected option labels by question id, then the written answer if any. */
 typealias InlineQuestionAnswers = Map<String, List<String>>
 
 /**
@@ -87,12 +91,13 @@ fun InlineQuestionForm(
 ) {
     val key = questions.joinToString("\u0000") { it.id }
     var selections by remember(key) { mutableStateOf<Map<String, Set<Int>>>(emptyMap()) }
+    var customs by remember(key) { mutableStateOf<Map<String, String>>(emptyMap()) }
     var submitting by remember(key) { mutableStateOf(false) }
     var localAnswers by remember(key) { mutableStateOf<InlineQuestionAnswers?>(null) }
     val scope = rememberCoroutineScope()
     val submitted = submittedAnswers ?: localAnswers
     val interactive = canInteract && submitted == null
-    val allAnswered = questions.all { it.required == false || (selections[it.id]?.size ?: 0) > 0 }
+    val allAnswered = questions.all { it.required == false || (selections[it.id]?.size ?: 0) > 0 || !customs[it.id].isNullOrBlank() }
     val colors = HappyTheme.colors
 
     ToolSection {
@@ -138,9 +143,20 @@ fun InlineQuestionForm(
                                         else -> current + index
                                     }
                                     selections = selections + (question.id to next)
+                                    if (!question.multiSelect) customs = customs - question.id
                                 },
                             )
                         }
+                    }
+                    if (question.allowCustom) {
+                        CustomAnswerField(
+                            value = customs[question.id].orEmpty(),
+                            enabled = interactive,
+                            onValueChange = { text ->
+                                customs = customs + (question.id to text)
+                                if (!question.multiSelect && text.isNotBlank()) selections = selections - question.id
+                            },
+                        )
                     }
                 }
             }
@@ -152,8 +168,10 @@ fun InlineQuestionForm(
                         shimmer = shimmerWhileSending,
                         onClick = {
                             val answers = questions.mapNotNull { q ->
-                                val chosen = selections[q.id].orEmpty()
-                                if (chosen.isEmpty()) null else q.id to chosen.sorted().mapNotNull { q.options.getOrNull(it)?.label }
+                                val chosen = selections[q.id].orEmpty().sorted().mapNotNull { q.options.getOrNull(it)?.label }
+                                val custom = customs[q.id]?.trim()?.ifEmpty { null }?.takeIf { q.allowCustom }
+                                val all = chosen + listOfNotNull(custom)
+                                if (all.isEmpty()) null else q.id to all
                             }.toMap()
                             submitting = true
                             localAnswers = answers
@@ -233,6 +251,37 @@ private fun InlineOption(option: AgentQuestionOption, selected: Boolean, multiSe
             }
         }
     }
+}
+
+/** A written answer under a question's options, as the modal's own-answer box. */
+@Composable
+private fun CustomAnswerField(value: String, enabled: Boolean, onValueChange: (String) -> Unit) {
+    val colors = HappyTheme.colors
+    val shape = RoundedCornerShape(QuestionSpec.optionRadius)
+    val style = QuestionSpec.optionLabel.copy(color = colors.text)
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        enabled = enabled,
+        textStyle = style,
+        cursorBrush = SolidColor(colors.text),
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag(QuestionTags.CUSTOM)
+            .alpha(if (enabled) 1f else QuestionSpec.DISABLED_OPACITY)
+            .defaultMinSize(minHeight = QuestionSpec.optionMinHeight)
+            .clip(shape)
+            .background(colors.surface)
+            .border(1.dp, if (value.isNotBlank()) ChatTheme.colors.radioActive else colors.divider, shape),
+        decorationBox = { inner ->
+            Box(Modifier.padding(QuestionSpec.optionPadding)) {
+                if (value.isEmpty()) {
+                    Text(stringResource(R.string.agent_question_own_answer_placeholder), style = style.copy(color = colors.textSecondary))
+                }
+                inner()
+            }
+        },
+    )
 }
 
 @Composable

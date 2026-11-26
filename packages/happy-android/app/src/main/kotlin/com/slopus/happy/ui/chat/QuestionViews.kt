@@ -28,6 +28,7 @@ object QuestionTags {
     const val HEADER_CHIP = "question.headerChip"
     const val OPTION = "question.option"
     const val SUBMIT = "question.submit"
+    const val CUSTOM = "question.custom"
     const val SUBMITTED = "question.submitted"
     const val BANNER = "question.banner"
     const val BANNER_DISMISS = "question.bannerDismiss"
@@ -183,7 +184,7 @@ fun RequestUserInputView(message: ChatMessage.ToolCallMessage, callbacks: Messag
         else -> communication.answers.mapValues { (_, a) -> a.options + listOfNotNull(a.custom?.ifEmpty { null }) }
     }
     InlineQuestionForm(
-        questions = communication.questions.map { InlineQuestion(it.id, it.question, it.header, it.options, it.multiSelect, it.required) },
+        questions = communication.questions.map { InlineQuestion(it.id, it.question, it.header, it.options, it.multiSelect, it.required, allowCustom = it.allowCustom != false) },
         canInteract = tool.state == ToolState.Running && communication.status == AgentFormStatus.Pending,
         submittedAnswers = submitted,
         onSubmit = { answers ->
@@ -192,7 +193,10 @@ fun RequestUserInputView(message: ChatMessage.ToolCallMessage, callbacks: Messag
             for (q in communication.questions) {
                 val selected = answers[q.id]
                 if (selected.isNullOrEmpty()) continue
-                out[q.id] = AgentQuestionAnswer(if (q.multiSelect) selected else selected.take(1))
+                val labels = q.options.map { it.label }.toSet()
+                val chosen = selected.filter { it in labels }
+                val custom = selected.firstOrNull { it !in labels }
+                out[q.id] = AgentQuestionAnswer(if (q.multiSelect) chosen else chosen.take(1), custom)
             }
             callbacks.onAnswerQuestion(communication.id, out, "form")
         },
