@@ -7,6 +7,13 @@
 
 import { AsyncLock } from '@/utils/lock';
 
+/**
+ * The only SDK system messages that leave the queue: background-task status,
+ * which the session protocol mapper turns into `task` events. Every other
+ * system message (init, status, hooks...) stays local.
+ */
+const FORWARDED_SYSTEM_SUBTYPES = new Set(['task_started', 'task_progress', 'task_updated', 'task_notification']);
+
 interface QueueItem {
     id: number;                    // Incremental ID for ordering
     logMessage: any;               
@@ -121,7 +128,7 @@ export class OutgoingMessageQueue {
             
             // Send if not already sent
             if (!item.sent) {
-                if (item.logMessage.type !== 'system') {
+                if (item.logMessage.type !== 'system' || FORWARDED_SYSTEM_SUBTYPES.has(item.logMessage.subtype)) {
                     this.sendFunction(item.logMessage);
                 }
                 item.sent = true;
