@@ -514,6 +514,21 @@ class BackgroundTaskTest {
     }
 
     @Test
+    fun `tasks started before the current CLI process end with the session`() {
+        val old = BackgroundTask(id = "call:old", kind = BackgroundTaskKind.Command, title = "old", startedAt = 100)
+        val current = BackgroundTask(id = "call:new", kind = BackgroundTaskKind.Command, title = "new", startedAt = 500)
+        val unknownStart = BackgroundTask(id = "task:x", kind = BackgroundTaskKind.Other, title = "x")
+
+        val shown = liveBackgroundTasks(listOf(old, current, unknownStart), cliGone = false, cliStartedAt = 300)
+
+        assertTrue(shown[0].endedWithSession)
+        assertTrue(shown[1].isRunning)
+        assertTrue(shown[2].isRunning)
+        assertEquals(listOf(old, current), liveBackgroundTasks(listOf(old, current), cliGone = false, cliStartedAt = null))
+        assertTrue(liveBackgroundTasks(listOf(current), cliGone = true, cliStartedAt = null).single().endedWithSession)
+    }
+
+    @Test
     fun `a running task ends with the session, without a made-up end time`() {
         val running = BackgroundTask("call:a", BackgroundTaskKind.Command, "Build", startedAt = 10)
         val ended = running.endedWithSession()

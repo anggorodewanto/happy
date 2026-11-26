@@ -261,13 +261,17 @@ data class ChatState(
      * The session's background tasks as the chat shows them. A task still
      * running once its Happy CLI is gone (a disconnected, offline or archived
      * session) reads as ended with the session, so no stale "N running" pill
-     * outlives it.
+     * outlives it. So does one started before the CLI that runs the session
+     * now (`lifecycleStateSince` of a `running` session is its start): Claude
+     * Code's background tasks die with the CLI process that started them.
      */
     val backgroundTasks: List<BackgroundTask>
-        get() = if (session?.isRig == false && sessionState == SessionState.Disconnected) {
-            snapshot.backgroundTasks.map { it.endedWithSession() }
-        } else {
-            snapshot.backgroundTasks
+        get() {
+            val tasks = snapshot.backgroundTasks
+            val info = session ?: return tasks
+            if (info.isRig) return tasks
+            val cliStartedAt = info.metadata?.takeIf { it.lifecycleState == "running" }?.lifecycleStateSince
+            return liveBackgroundTasks(tasks, cliGone = sessionState == SessionState.Disconnected, cliStartedAt = cliStartedAt)
         }
 }
 

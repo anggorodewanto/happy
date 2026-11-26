@@ -124,6 +124,23 @@ data class BackgroundTask(
     val isRunning: Boolean get() = status == BackgroundTaskStatus.Running
 }
 
+/**
+ * The tasks a CLI session still runs: every running one ends with the
+ * session when its CLI is gone ([cliGone]), and so does one started before
+ * the CLI process that runs the session now ([cliStartedAt]).
+ */
+fun liveBackgroundTasks(tasks: List<BackgroundTask>, cliGone: Boolean, cliStartedAt: Long?): List<BackgroundTask> {
+    if (cliGone) return tasks.map { it.endedWithSession() }
+    if (cliStartedAt == null) return tasks
+    return tasks.map { task -> if (task.startedBefore(cliStartedAt)) task.endedWithSession() else task }
+}
+
+/** True when the task's start is known and came before [instant]. */
+fun BackgroundTask.startedBefore(instant: Long): Boolean {
+    val started = startedAt ?: return false
+    return started < instant
+}
+
 /** A task still running when its session's CLI is gone reads as ended, without a made-up end time. */
 fun BackgroundTask.endedWithSession(): BackgroundTask {
     if (!isRunning) return this
