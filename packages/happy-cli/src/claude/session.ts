@@ -4,6 +4,7 @@ import { EnhancedMode } from "./loop";
 import { logger } from "@/ui/logger";
 import type { JsRuntime } from "./runClaude";
 import type { SandboxConfig } from "@/persistence";
+import type { ContextWindowByModel } from "./utils/contextWindow";
 
 export class Session {
     readonly path: string;
@@ -26,6 +27,12 @@ export class Session {
     sessionId: string | null;
     mode: 'local' | 'remote' = 'local';
     thinking: boolean = false;
+
+    /**
+     * Real context windows learned per model. Remote mode fills it from SDK
+     * result messages; local mode reads it so both modes agree on the limit.
+     */
+    readonly contextWindows: ContextWindowByModel = new Map();
     
     /** Callbacks to be notified when session ID is found/changed */
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];

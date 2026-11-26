@@ -24,30 +24,61 @@ function getClaudeSettingsPath(): string {
 }
 
 /**
- * Read Claude's settings.json file from the default location
- * 
- * @returns Claude settings object or null if file doesn't exist or can't be read
+ * Read one Claude settings.json file
+ *
+ * @returns Settings object or null if file doesn't exist or can't be read
  */
-export function readClaudeSettings(): ClaudeSettings | null {
+function readClaudeSettingsFile(settingsPath: string): ClaudeSettings | null {
   try {
-    const settingsPath = getClaudeSettingsPath();
-    
     if (!existsSync(settingsPath)) {
       logger.debug(`[ClaudeSettings] No Claude settings file found at ${settingsPath}`);
       return null;
     }
-    
+
     const settingsContent = readFileSync(settingsPath, 'utf-8');
     const settings = JSON.parse(settingsContent) as ClaudeSettings;
-    
+
     logger.debug(`[ClaudeSettings] Successfully read Claude settings from ${settingsPath}`);
     logger.debug(`[ClaudeSettings] includeCoAuthoredBy: ${settings.includeCoAuthoredBy}`);
-    
+
     return settings;
   } catch (error) {
     logger.debug(`[ClaudeSettings] Error reading Claude settings: ${error}`);
     return null;
   }
+}
+
+/**
+ * Read Claude's settings.json file from the default location
+ * 
+ * @returns Claude settings object or null if file doesn't exist or can't be read
+ */
+export function readClaudeSettings(): ClaudeSettings | null {
+  return readClaudeSettingsFile(getClaudeSettingsPath());
+}
+
+/**
+ * Resolve the configured `model` the way Claude Code picks settings files:
+ * project local beats project beats user settings, and the first file that
+ * actually sets `model` wins.
+ *
+ * @returns The configured model string, or undefined when none is set
+ */
+export function readClaudeModelSetting(cwd: string): string | undefined {
+  const candidates = [
+    join(cwd, '.claude', 'settings.local.json'),
+    join(cwd, '.claude', 'settings.json'),
+    getClaudeSettingsPath(),
+  ];
+
+  for (const settingsPath of candidates) {
+    const model = readClaudeSettingsFile(settingsPath)?.model;
+    if (typeof model === 'string' && model.trim() !== '') {
+      return model;
+    }
+  }
+
+  return undefined;
 }
 
 /**

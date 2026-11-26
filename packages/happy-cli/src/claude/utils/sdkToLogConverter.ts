@@ -14,6 +14,7 @@ import type {
 } from '@/claude/sdk'
 import type { RawJSONLines } from '@/claude/types'
 import type { PermissionResponseLookup } from './permissionHandler'
+import { recordContextWindow, type ContextWindowByModel } from './contextWindow'
 
 /**
  * Context for converting SDK messages to log format
@@ -52,11 +53,12 @@ export class SDKToLogConverter {
     private context: ConversionContext
     private responses?: PermissionResponseLookup
     private sidechainLastUUID = new Map<string, string>();
-    private contextWindowByModel = new Map<string, number>();
+    private contextWindowByModel: ContextWindowByModel;
 
     constructor(
         context: Omit<ConversionContext, 'parentUuid'>,
-        responses?: PermissionResponseLookup
+        responses?: PermissionResponseLookup,
+        contextWindows?: ContextWindowByModel
     ) {
         this.context = {
             ...context,
@@ -65,6 +67,8 @@ export class SDKToLogConverter {
             parentUuid: null
         }
         this.responses = responses
+        // Share the session-wide map so local mode sees windows measured here.
+        this.contextWindowByModel = contextWindows ?? new Map()
     }
 
     /**
@@ -221,10 +225,7 @@ export class SDKToLogConverter {
                 // messages (see withContextWindow).
                 const resultMsg = sdkMessage as SDKResultMessage
                 for (const [model, usage] of Object.entries(resultMsg.modelUsage ?? {})) {
-                    const contextWindow = usage?.contextWindow
-                    if (typeof contextWindow === 'number' && Number.isFinite(contextWindow) && contextWindow > 0) {
-                        this.contextWindowByModel.set(model, contextWindow)
-                    }
+                    recordContextWindow(this.contextWindowByModel, model, usage?.contextWindow)
                 }
                 break
             }

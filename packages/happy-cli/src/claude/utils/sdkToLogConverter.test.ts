@@ -285,6 +285,20 @@ describe('SDKToLogConverter', () => {
 
             expect((logMessage as any)?.message).not.toHaveProperty('usage')
         })
+
+        it('should share measured windows through the provided map', () => {
+            const shared = new Map<string, number>()
+            const sharedConverter = new SDKToLogConverter(context, undefined, shared)
+
+            sharedConverter.convert(resultReporting({ 'claude-opus-4-8': { contextWindow: 1_000_000 } }))
+
+            expect(shared.get('claude-opus-4-8')).toBe(1_000_000)
+
+            const logMessage = converter.convert(assistantWithUsage('claude-opus-4-8'))
+
+            expect((logMessage as any)?.message.usage).not.toHaveProperty('context_window')
+            expect(shared.get('claude-opus-4-8')).toBe(1_000_000)
+        })
     })
 
     describe('Parent-child relationships', () => {

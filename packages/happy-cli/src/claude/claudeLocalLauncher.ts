@@ -4,6 +4,7 @@ import { Session } from "./session";
 import { Future } from "@/utils/future";
 import { createSessionScanner } from "./utils/sessionScanner";
 import { launchFailureMessage } from "./utils/launchFailureMessage";
+import { resolveConfiguredModel, stampContextWindow, type ContextWindowByModel } from "./utils/contextWindow";
 
 export type LauncherResult = { type: 'switch' } | { type: 'exit', code: number };
 
@@ -11,21 +12,36 @@ export async function claudeLocalLauncher(session: Session): Promise<LauncherRes
 
     let scannerMessageChain = Promise.resolve();
 
+    // Shared with remote mode, which learns real windows from SDK result
+    // messages. Local transcripts have no result messages, so anything not
+    // already known is inferred below.
+    const contextWindows: ContextWindowByModel = session.contextWindows ?? new Map();
+    const configuredModel = resolveConfiguredModel({
+        claudeArgs: session.claudeArgs,
+        claudeEnvVars: session.claudeEnvVars,
+        cwd: session.path,
+    });
+
     // Create scanner
     const scanner = await createSessionScanner({
         sessionId: session.sessionId,
         workingDirectory: session.path,
         onMessage: (message) => { 
             // Block SDK summary messages - we generate our own
-            if (message.type !== 'summary') {
-                scannerMessageChain = scannerMessageChain.then(async () => {
-                    try {
-                        await session.client.sendClaudeSessionMessageFromLocalTranscript(message);
-                    } catch (error) {
-                        logger.debug('[local]: failed to send Claude transcript message', error);
-                    }
-                });
+            if (message.type === 'summary') {
+                return;
             }
+            const stamped = stampContextWindow(message, {
+                windows: contextWindows,
+                configuredModel,
+            });
+            scannerMessageChain = scannerMessageChain.then(async () => {
+                try {
+                    await session.client.sendClaudeSessionMessageFromLocalTranscript(stamped);
+                } catch (error) {
+                    logger.debug('[local]: failed to send Claude transcript message', error);
+                }
+            });
         }
     });
     

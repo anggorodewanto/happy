@@ -207,6 +207,163 @@ describe('claudeLocalLauncher', () => {
         await launcher;
     });
 
+    it('stamps an inferred context window onto assistant transcript messages', async () => {
+        const localRun = createDeferred<void>();
+        let scannerOptions: ScannerOptions | undefined;
+
+        mockCreateSessionScanner.mockImplementation(async (opts: ScannerOptions) => {
+            scannerOptions = opts;
+            return {
+                onNewSession: vi.fn(),
+                cleanup: vi.fn(async () => {}),
+            };
+        });
+        mockClaudeLocal.mockImplementation(async () => {
+            await localRun.promise;
+        });
+
+        const session = {
+            sessionId: 'claude-session-1',
+            path: '/tmp/project',
+            client: {
+                sendClaudeSessionMessage: vi.fn(),
+                sendClaudeSessionMessageFromLocalTranscript: vi.fn(async () => {}),
+                closeClaudeSessionTurn: vi.fn(),
+                rpcHandlerManager: {
+                    registerHandler: vi.fn(),
+                },
+            },
+            queue: {
+                reset: vi.fn(),
+                setOnMessage: vi.fn(),
+                size: vi.fn(() => 0),
+            },
+            contextWindows: new Map<string, number>(),
+            addSessionFoundCallback: vi.fn(),
+            removeSessionFoundCallback: vi.fn(),
+            onAbort: vi.fn(),
+            onSessionFound: vi.fn(),
+            onThinkingChange: vi.fn(),
+            consumeOneTimeFlags: vi.fn(),
+            claudeEnvVars: { ANTHROPIC_MODEL: 'claude-opus-4-8' },
+            claudeArgs: undefined,
+            mcpServers: {},
+            allowedTools: [],
+            hookSettingsPath: '/tmp/hook-settings.json',
+            sandboxConfig: undefined,
+        };
+
+        const launcher = claudeLocalLauncher(session as any);
+
+        await vi.waitFor(() => {
+            expect(scannerOptions).toBeDefined();
+        });
+
+        scannerOptions!.onMessage({
+            type: 'assistant',
+            uuid: 'a-1',
+            message: {
+                role: 'assistant',
+                model: 'claude-opus-4-8',
+                content: [{ type: 'text', text: 'hi' }],
+                usage: { input_tokens: 10, output_tokens: 5 },
+            },
+        });
+
+        await vi.waitFor(() => {
+            expect(session.client.sendClaudeSessionMessageFromLocalTranscript).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    uuid: 'a-1',
+                    message: expect.objectContaining({
+                        usage: expect.objectContaining({ context_window: 200_000 }),
+                    }),
+                }),
+            );
+        });
+
+        localRun.resolve();
+        await launcher;
+    });
+
+    it('prefers a context window measured earlier in the same session', async () => {
+        const localRun = createDeferred<void>();
+        let scannerOptions: ScannerOptions | undefined;
+
+        mockCreateSessionScanner.mockImplementation(async (opts: ScannerOptions) => {
+            scannerOptions = opts;
+            return {
+                onNewSession: vi.fn(),
+                cleanup: vi.fn(async () => {}),
+            };
+        });
+        mockClaudeLocal.mockImplementation(async () => {
+            await localRun.promise;
+        });
+
+        const session = {
+            sessionId: 'claude-session-1',
+            path: '/tmp/project',
+            client: {
+                sendClaudeSessionMessage: vi.fn(),
+                sendClaudeSessionMessageFromLocalTranscript: vi.fn(async () => {}),
+                closeClaudeSessionTurn: vi.fn(),
+                rpcHandlerManager: {
+                    registerHandler: vi.fn(),
+                },
+            },
+            queue: {
+                reset: vi.fn(),
+                setOnMessage: vi.fn(),
+                size: vi.fn(() => 0),
+            },
+            // Remote mode measured this before switching to local.
+            contextWindows: new Map([['claude-opus-4-8', 1_000_000]]),
+            addSessionFoundCallback: vi.fn(),
+            removeSessionFoundCallback: vi.fn(),
+            onAbort: vi.fn(),
+            onSessionFound: vi.fn(),
+            onThinkingChange: vi.fn(),
+            consumeOneTimeFlags: vi.fn(),
+            claudeEnvVars: undefined,
+            claudeArgs: undefined,
+            mcpServers: {},
+            allowedTools: [],
+            hookSettingsPath: '/tmp/hook-settings.json',
+            sandboxConfig: undefined,
+        };
+
+        const launcher = claudeLocalLauncher(session as any);
+
+        await vi.waitFor(() => {
+            expect(scannerOptions).toBeDefined();
+        });
+
+        scannerOptions!.onMessage({
+            type: 'assistant',
+            uuid: 'a-2',
+            message: {
+                role: 'assistant',
+                model: 'claude-opus-4-8',
+                content: [{ type: 'text', text: 'hi' }],
+                usage: { input_tokens: 10, output_tokens: 5 },
+            },
+        });
+
+        await vi.waitFor(() => {
+            expect(session.client.sendClaudeSessionMessageFromLocalTranscript).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    uuid: 'a-2',
+                    message: expect.objectContaining({
+                        usage: expect.objectContaining({ context_window: 1_000_000 }),
+                    }),
+                }),
+            );
+        });
+
+        localRun.resolve();
+        await launcher;
+    });
+
     it('reports the underlying error when a launch throws, instead of a bare notice', async () => {
         // The SDK surfaces an unresolvable native binary as a plain Error; the
         // launcher used to drop it and report only "Process exited unexpectedly".

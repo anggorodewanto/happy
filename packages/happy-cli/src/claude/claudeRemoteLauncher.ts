@@ -130,7 +130,7 @@ export async function claudeRemoteLauncher(session: Session): Promise<'switch' |
         sessionId: session.sessionId || 'unknown',
         cwd: session.path,
         version: process.env.npm_package_version
-    }, permissionHandler.getResponseLookup());
+    }, permissionHandler.getResponseLookup(), session.contextWindows);
 
 
     // Handle messages

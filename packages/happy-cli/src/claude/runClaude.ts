@@ -36,6 +36,7 @@ import { applySandboxPermissionPolicy, normalizeRemotePermissionMode, resolveIni
 import { decodeBase64, encodeBase64 } from '@/api/encryption';
 import type { Session as ApiSession } from '@/api/types';
 import { getProjectPath } from './utils/path';
+import { resolveConfiguredModel, stampContextWindow, type ContextWindowByModel } from './utils/contextWindow';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { RawJSONLinesSchema, type RawJSONLines } from './types';
@@ -183,6 +184,16 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
     if (!response) {
         let offlineSessionId: string | null = null;
 
+        // Offline local mode also replays the on-disk transcript, which has no
+        // SDK result messages, so stamp the same inferred context window the
+        // local launcher does.
+        const offlineContextWindows: ContextWindowByModel = new Map();
+        const offlineConfiguredModel = resolveConfiguredModel({
+            claudeArgs: options.claudeArgs,
+            claudeEnvVars: options.claudeEnvVars,
+            cwd: workingDirectory,
+        });
+
         const reconnection = startOfflineReconnection({
             serverUrl: configuration.serverUrl,
             onReconnected: async () => {
@@ -224,7 +235,12 @@ export async function runClaude(credentials: Credentials, options: StartOptions 
                     sessionId: null,
                     workingDirectory,
                     onMessage: (msg) => {
-                        void session.sendClaudeSessionMessageFromLocalTranscript(msg);
+                        void session.sendClaudeSessionMessageFromLocalTranscript(
+                            stampContextWindow(msg, {
+                                windows: offlineContextWindows,
+                                configuredModel: offlineConfiguredModel,
+                            }),
+                        );
                     },
                     onTranscriptEvent: updateClaudeGoalState,
                 });
