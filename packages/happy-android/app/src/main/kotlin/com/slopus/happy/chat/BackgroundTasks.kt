@@ -271,6 +271,8 @@ private fun leadingTaskNotificationEnd(text: String): Int? {
  */
 internal class BackgroundTaskTracker {
     private val tasks = LinkedHashMap<String, BackgroundTask>()
+    /** Live task ids the SDK started in the foreground; their later events draw no row. */
+    private val foregroundTaskIds = HashSet<String>()
     /** Notification task ids already applied, so a repeated envelope updates nothing twice. */
     private val keyByTaskId = HashMap<String, String>()
     private val pendingStops = HashMap<String, Long>()
@@ -356,6 +358,13 @@ internal class BackgroundTaskTracker {
     }
 
     private fun liveStarted(event: BackgroundTaskEvent, at: Long) {
+        // The SDK reports every Bash call and subagent as a task; one that runs
+        // in the foreground is not a background task unless a background call
+        // already started its row.
+        if (event.isBackgrounded == false && keyOf(event) == null) {
+            foregroundTaskIds.add(event.taskId)
+            return
+        }
         val key = link(event, at) ?: return
         val task = tasks.getValue(key)
         val description = event.description?.trim()?.takeIf { it.isNotEmpty() }
@@ -449,6 +458,8 @@ internal class BackgroundTaskTracker {
      * never creates a task: it carries no title or start.
      */
     private fun link(event: BackgroundTaskEvent, at: Long): String? {
+        if (event.isBackgrounded == true) foregroundTaskIds.remove(event.taskId)
+        if (event.taskId in foregroundTaskIds) return null
         keyOf(event)?.let { key ->
             if (tasks.getValue(key).taskId == null) tasks[key] = tasks.getValue(key).copy(taskId = event.taskId)
             keyByTaskId[event.taskId] = key

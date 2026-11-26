@@ -396,6 +396,31 @@ class BackgroundTaskTest {
     }
 
     @Test
+    fun `a foreground task's live events draw no row`() {
+        val state = ReducerState()
+        state.reduce(taskRecord("t1", 110, taskEvent("started") {
+            put("taskId", "bfg1"); put("toolUseId", "call-fg"); put("description", "ls -la"); put("isBackgrounded", false)
+        }))
+        state.reduce(taskRecord("t2", 120, taskEvent("updated") { put("taskId", "bfg1"); put("status", "completed") }))
+        state.reduce(taskRecord("t3", 121, taskEvent("notification") {
+            put("taskId", "bfg1"); put("toolUseId", "call-fg"); put("status", "completed"); put("summary", "ls -la")
+        }))
+        assertEquals(emptyList<BackgroundTask>(), state.backgroundTasks)
+    }
+
+    @Test
+    fun `a foreground task moved to the background gets its row`() {
+        val state = ReducerState()
+        state.reduce(taskRecord("t1", 110, taskEvent("started") {
+            put("taskId", "bfg2"); put("description", "npm test"); put("isBackgrounded", false)
+        }))
+        state.reduce(taskRecord("t2", 120, taskEvent("updated") { put("taskId", "bfg2"); put("isBackgrounded", true) }))
+        val task = state.backgroundTasks.single()
+        assertEquals("bfg2", task.taskId)
+        assertTrue(task.isRunning)
+    }
+
+    @Test
     fun `a live task_started links the call and draws no row`() {
         val state = ReducerState()
         state.reduce(startCall(callId = "call-1", at = 100))
