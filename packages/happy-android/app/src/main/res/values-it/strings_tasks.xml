@@ -15,5 +15,11 @@
     <string name="chat_tasks_status_completed">Completata</string>
     <string name="chat_tasks_status_failed">Non riuscita</string>
     <string name="chat_tasks_status_cancelled">Annullata</string>
+    <string name="chat_tasks_status_ended_with_session">Terminata con la sessione</string>
     <string name="chat_tasks_status_time">%1$s · %2$s</string>
+    <plurals name="chat_tasks_tool_uses">
+        <item quantity="one">%1$d uso dello strumento</item>
+        <item quantity="many">%1$d usi degli strumenti</item>
+        <item quantity="other">%1$d usi degli strumenti</item>
+    </plurals>
 </resources>

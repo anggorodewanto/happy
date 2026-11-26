@@ -245,7 +245,7 @@ private fun ChatComposerFor(
         flight = flight?.takeIf { !pictures && !reduceMotion },
         above = {
             ComposerInfoRow(
-                tasks = if (state.session != null) state.snapshot.backgroundTasks else emptyList(),
+                tasks = if (state.session != null) state.backgroundTasks else emptyList(),
                 usage = state.snapshot.usage,
                 limits = session.agentState?.usageLimits,
                 sessionKey = session.id,

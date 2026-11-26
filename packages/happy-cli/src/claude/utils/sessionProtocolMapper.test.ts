@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createId, isCuid } from '@paralleldrive/cuid2';
 import { RawJSONLinesSchema } from '../types';
 import {
@@ -549,6 +549,161 @@ describe('mapClaudeLogMessageToSessionEnvelopes', () => {
 
         expect(result.currentTurnId).toBe('turn-1');
         expect(result.envelopes).toHaveLength(0);
+    });
+
+    it('still drops system messages that are not task lifecycle', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-1',
+            subtype: 'init',
+            session_id: 'session-1',
+            tools: ['Bash'],
+        } as any, { currentTurnId: 'turn-1' });
+
+        expect(result.currentTurnId).toBe('turn-1');
+        expect(result.envelopes).toHaveLength(0);
+    });
+
+    it('maps task_started as an additive agent task event', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-started-1',
+            subtype: 'task_started',
+            task_id: 'task-1',
+            tool_use_id: 'toolu-1',
+            description: 'Run the build',
+            task_type: 'background_command',
+            is_backgrounded: true,
+        } as any, { currentTurnId: 'turn-1' });
+
+        expect(result.currentTurnId).toBe('turn-1');
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].role).toBe('agent');
+        expect(result.envelopes[0].turn).toBeUndefined();
+        expect(result.envelopes[0].ev).toEqual({
+            t: 'task',
+            phase: 'started',
+            taskId: 'task-1',
+            toolUseId: 'toolu-1',
+            description: 'Run the build',
+            taskType: 'background_command',
+            isBackgrounded: true,
+        });
+    });
+
+    it('maps an unknown future status away instead of failing the envelope', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-updated-1',
+            subtype: 'task_updated',
+            task_id: 'task-1',
+            patch: { status: 'teleported', description: 'Still here' },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].ev).toEqual({
+            t: 'task',
+            phase: 'updated',
+            taskId: 'task-1',
+            description: 'Still here',
+        });
+    });
+
+    it('throttles task_progress and flushes the last one before a status change', () => {
+        const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+        const state = { currentTurnId: null };
+        const progress = (lastToolName: string) => ({
+            type: 'system',
+            uuid: `system-progress-${lastToolName}`,
+            subtype: 'task_progress',
+            task_id: 'task-1',
+            description: 'Run the build',
+            last_tool_name: lastToolName,
+            usage: { total_tokens: 120, tool_uses: 3, duration_ms: 2_500 },
+        }) as any;
+
+        const first = mapClaudeLogMessageToSessionEnvelopes(progress('Bash'), state);
+        expect(first.envelopes).toHaveLength(1);
+        expect(first.envelopes[0].ev).toEqual({
+            t: 'task',
+            phase: 'progress',
+            taskId: 'task-1',
+            description: 'Run the build',
+            lastToolName: 'Bash',
+            usage: { totalTokens: 120, toolUses: 3, durationMs: 2_500 },
+        });
+
+        // Within the window: held, not sent.
+        now.mockReturnValue(1_002_000);
+        const second = mapClaudeLogMessageToSessionEnvelopes(progress('Edit'), state);
+        expect(second.envelopes).toHaveLength(0);
+
+        // A status change flushes the held progress first.
+        now.mockReturnValue(1_003_000);
+        const updated = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-updated-2',
+            subtype: 'task_updated',
+            task_id: 'task-1',
+            patch: { status: 'completed' },
+        } as any, state);
+        expect(updated.envelopes).toHaveLength(2);
+        expect(updated.envelopes[0].ev).toMatchObject({ t: 'task', phase: 'progress', lastToolName: 'Edit' });
+        expect(updated.envelopes[1].ev).toMatchObject({ t: 'task', phase: 'updated', status: 'completed' });
+
+        now.mockRestore();
+    });
+
+    it('maps task_notification with its status, summary, output file and usage', () => {
+        const result = mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-notification-1',
+            subtype: 'task_notification',
+            task_id: 'task-1',
+            tool_use_id: 'toolu-1',
+            status: 'completed',
+            output_file: '/tmp/task-1.output',
+            summary: 'Background command "npm run build" completed',
+            usage: { total_tokens: 900, tool_uses: 12, duration_ms: 83_000 },
+        } as any, { currentTurnId: null });
+
+        expect(result.envelopes).toHaveLength(1);
+        expect(result.envelopes[0].ev).toEqual({
+            t: 'task',
+            phase: 'notification',
+            taskId: 'task-1',
+            toolUseId: 'toolu-1',
+            status: 'completed',
+            summary: 'Background command "npm run build" completed',
+            outputFile: '/tmp/task-1.output',
+            usage: { totalTokens: 900, toolUses: 12, durationMs: 83_000 },
+        });
+    });
+
+    it('flushes held task progress when the turn closes', () => {
+        const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+        const state = { currentTurnId: 'turn-1' };
+        mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-progress-close-1',
+            subtype: 'task_progress',
+            task_id: 'task-1',
+            summary: 'first',
+        } as any, state);
+        now.mockReturnValue(1_001_000);
+        mapClaudeLogMessageToSessionEnvelopes({
+            type: 'system',
+            uuid: 'system-progress-close-2',
+            subtype: 'task_progress',
+            task_id: 'task-1',
+            summary: 'last',
+        } as any, state);
+
+        const closed = closeClaudeTurnWithStatus(state, 'completed');
+        expect(closed.envelopes).toHaveLength(2);
+        expect(closed.envelopes[0].ev).toMatchObject({ t: 'task', phase: 'progress', summary: 'last' });
+        expect(closed.envelopes[1].ev).toEqual({ t: 'turn-end', status: 'completed' });
+        now.mockRestore();
     });
 });
 

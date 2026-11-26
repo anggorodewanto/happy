@@ -11,5 +11,9 @@
     <string name="chat_tasks_status_completed">已完成</string>
     <string name="chat_tasks_status_failed">失败</string>
     <string name="chat_tasks_status_cancelled">已取消</string>
+    <string name="chat_tasks_status_ended_with_session">随会话结束</string>
     <string name="chat_tasks_status_time">%1$s · %2$s</string>
+    <plurals name="chat_tasks_tool_uses">
+        <item quantity="other">%1$d 次工具调用</item>
+    </plurals>
 </resources>

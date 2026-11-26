@@ -4,15 +4,22 @@ import androidx.compose.runtime.Immutable
 import kotlinx.serialization.json.JsonElement
 
 // Background work a Claude Code session started besides its own turn: commands
-// started with run_in_background, background subagents and watchers. happy-cli
-// (packages/happy-cli/src/claude) sends no session envelope for the SDK's
-// task_started / task_progress / task_notification system messages
-// (sessionProtocolMapper.ts drops every `system` message), so the two things
-// that do reach the app are the tool call that started a task (its
-// `run_in_background` input, with the command and description) and the
-// `<task-notification>` envelope Claude Code writes into the conversation when
-// the task ends (happy-wire controlMessages.ts). That is what this builds task
-// state from; there is no live progress (see AGENTS.md, "Background tasks").
+// started with run_in_background, background subagents and watchers. Two
+// sources feed it, in this order:
+//
+// - Live SDK events: happy-cli forwards the Agent SDK's `task_started`,
+//   `task_progress`, `task_updated` and `task_notification` system messages as
+//   the additive `task` session event (sessionProtocolMapper.ts). They carry
+//   the exact task id and tool-use id, progress and counters, and the final
+//   status. When they exist they win.
+// - What an older CLI sends: the tool call that started a task (its
+//   `run_in_background` input, with the command and description) and the
+//   `<task-notification>` envelope Claude Code writes into the conversation when
+//   the task ends (happy-wire controlMessages.ts). That is the fallback, with
+//   no live progress.
+//
+// A task still running when its session's CLI is gone is shown ended with the
+// session (see ChatState.backgroundTasks).
 
 private const val TASK_NOTIFICATION_OPEN = "<task-notification>"
 private const val TASK_NOTIFICATION_CLOSE = "</task-notification>"
@@ -36,6 +43,45 @@ enum class BackgroundTaskStatus {
         }
     }
 }
+
+/** Which SDK system message a live [BackgroundTaskEvent] came from. */
+enum class BackgroundTaskPhase {
+    Started, Progress, Updated, Notification;
+
+    companion object {
+        fun of(raw: String?): BackgroundTaskPhase? = when (raw?.trim()?.lowercase()) {
+            "started" -> Started
+            "progress" -> Progress
+            "updated" -> Updated
+            "notification" -> Notification
+            else -> null
+        }
+    }
+}
+
+/**
+ * One live background-task event from the Claude Agent SDK's `task_started`,
+ * `task_progress`, `task_updated` and `task_notification` system messages,
+ * forwarded by happy-cli as the `task` session event. Unlike
+ * [BackgroundTaskNotification], which Claude Code writes into the conversation
+ * when a task ends, these arrive while it runs.
+ */
+@Immutable
+data class BackgroundTaskEvent(
+    val phase: BackgroundTaskPhase,
+    val taskId: String,
+    val toolUseId: String? = null,
+    val description: String? = null,
+    val status: String? = null,
+    val summary: String? = null,
+    val lastToolName: String? = null,
+    val outputFile: String? = null,
+    val taskType: String? = null,
+    val isBackgrounded: Boolean? = null,
+    val totalTokens: Long? = null,
+    val toolUses: Long? = null,
+    val durationMs: Long? = null,
+)
 
 /**
  * One background task of a session, as far as the protocol carries it. A task
@@ -64,8 +110,30 @@ data class BackgroundTask(
     val toolUses: Long? = null,
     /** The notification's `<task-id>`, once one has named this task. */
     val taskId: String? = null,
+    /** The SDK's live progress line (`task_progress.summary`), while it runs. */
+    val progress: String? = null,
+    /** The last tool a running task used, and its live counters. */
+    val lastToolName: String? = null,
+    val totalTokens: Long? = null,
+    val durationMs: Long? = null,
+    /** True once a live SDK event has described this task. */
+    val hasLiveUpdates: Boolean = false,
+    /** Running when its session's CLI went away: listed as ended, never as running. */
+    val endedWithSession: Boolean = false,
 ) {
     val isRunning: Boolean get() = status == BackgroundTaskStatus.Running
+}
+
+/** A task still running when its session's CLI is gone reads as ended, without a made-up end time. */
+fun BackgroundTask.endedWithSession(): BackgroundTask {
+    if (!isRunning) return this
+    return copy(
+        status = BackgroundTaskStatus.Cancelled,
+        endedWithSession = true,
+        progress = null,
+        lastToolName = null,
+        durationMs = null,
+    )
 }
 
 /**
@@ -212,7 +280,7 @@ internal class BackgroundTaskTracker {
 
     fun result(callId: String, resultText: String?) {
         val key = "call:$callId"
-        val task = tasks[key] ?: return
+        if (key !in tasks) return
         if (resultText == null) return
         // Extract task ID from Claude Code's result text:
         // - Bash: "Command running in background with ID: b6h0hc9m1."
@@ -225,8 +293,14 @@ internal class BackgroundTaskTracker {
             ?: monitorMatch?.groupValues?.get(1)
             ?: agentMatch?.groupValues?.get(1)
         if (taskId != null) {
+            // A live `started` without a tool-use id may have made its own
+            // `task:<id>` row before this result named the call: fold it in.
+            val liveKey = "task:$taskId"
+            if (keyByTaskId[taskId] == liveKey && liveKey in tasks) {
+                merge(liveKey, key)
+            }
             keyByTaskId[taskId] = key
-            tasks[key] = task.copy(taskId = taskId)
+            tasks[key] = tasks.getValue(key).copy(taskId = taskId)
             pendingStops.remove(taskId)?.let { stoppedAt -> stop(taskId, stoppedAt) }
         }
         // Extract output file for Bash commands
@@ -235,6 +309,157 @@ internal class BackgroundTaskTracker {
         if (outputFile != null) {
             tasks[key] = tasks.getValue(key).copy(outputFile = outputFile)
         }
+    }
+
+    fun live(event: BackgroundTaskEvent, at: Long) {
+        when (event.phase) {
+            BackgroundTaskPhase.Started -> liveStarted(event, at)
+            BackgroundTaskPhase.Progress -> liveProgress(event, at)
+            BackgroundTaskPhase.Updated -> liveUpdated(event, at)
+            BackgroundTaskPhase.Notification -> liveNotification(event, at)
+        }
+    }
+
+    private fun liveStarted(event: BackgroundTaskEvent, at: Long) {
+        val key = link(event, at) ?: return
+        val task = tasks.getValue(key)
+        val description = event.description?.trim()?.takeIf { it.isNotEmpty() }
+        tasks[key] = task.copy(
+            taskId = event.taskId,
+            title = betterTitle(task, description),
+            kind = if (task.kind == BackgroundTaskKind.Other) kindOfLive(event) else task.kind,
+            startedAt = task.startedAt ?: at,
+            hasLiveUpdates = true,
+        )
+        pendingStops.remove(event.taskId)?.let { stoppedAt -> stop(event.taskId, stoppedAt) }
+    }
+
+    private fun liveProgress(event: BackgroundTaskEvent, at: Long) {
+        val key = keyOf(event) ?: return
+        val task = tasks[key] ?: return
+        tasks[key] = task.copy(
+            hasLiveUpdates = true,
+            progress = event.summary?.trim()?.takeIf { it.isNotEmpty() } ?: task.progress,
+            lastToolName = event.lastToolName?.trim()?.takeIf { it.isNotEmpty() } ?: task.lastToolName,
+            totalTokens = event.totalTokens ?: task.totalTokens,
+            toolUses = event.toolUses ?: task.toolUses,
+            durationMs = event.durationMs ?: task.durationMs,
+        )
+    }
+
+    private fun liveUpdated(event: BackgroundTaskEvent, at: Long) {
+        val key = link(event, at) ?: return
+        val task = tasks.getValue(key)
+        val status = event.status?.let(::liveStatus) ?: BackgroundTaskStatus.Running
+        val terminal = status != BackgroundTaskStatus.Running
+        tasks[key] = task.copy(
+            taskId = event.taskId,
+            title = betterTitle(task, event.description?.trim()?.takeIf { it.isNotEmpty() }),
+            status = if (terminal || task.isRunning) status else task.status,
+            finishedAt = if (terminal) task.finishedAt ?: at else task.finishedAt,
+            hasLiveUpdates = true,
+        )
+    }
+
+    private fun liveNotification(event: BackgroundTaskEvent, at: Long) {
+        val key = link(event, at) ?: return
+        val task = tasks.getValue(key)
+        tasks[key] = task.copy(
+            taskId = event.taskId,
+            status = event.status?.let(BackgroundTaskStatus::of) ?: BackgroundTaskStatus.Completed,
+            finishedAt = task.finishedAt ?: at,
+            summary = event.summary?.trim()?.takeIf { it.isNotEmpty() } ?: task.summary,
+            outputFile = event.outputFile ?: task.outputFile,
+            totalTokens = event.totalTokens ?: task.totalTokens,
+            toolUses = event.toolUses ?: task.toolUses,
+            durationMs = event.durationMs ?: task.durationMs,
+            hasLiveUpdates = true,
+        )
+        keyByTaskId[event.taskId] = key
+    }
+
+    /** Fold the live row [fromKey] into the call's task [intoKey], keeping both sides' data. */
+    private fun merge(fromKey: String, intoKey: String) {
+        val from = tasks[fromKey] ?: return
+        val into = tasks[intoKey] ?: return
+        tasks[intoKey] = into.copy(
+            title = into.title.takeIf { it.isNotBlank() && it != into.taskId } ?: from.title,
+            taskId = into.taskId ?: from.taskId,
+            startedAt = into.startedAt ?: from.startedAt,
+            finishedAt = into.finishedAt ?: from.finishedAt,
+            status = if (!into.isRunning) into.status else from.status,
+            progress = into.progress ?: from.progress,
+            lastToolName = into.lastToolName ?: from.lastToolName,
+            totalTokens = into.totalTokens ?: from.totalTokens,
+            toolUses = into.toolUses ?: from.toolUses,
+            durationMs = into.durationMs ?: from.durationMs,
+            summary = into.summary ?: from.summary,
+            outputFile = into.outputFile ?: from.outputFile,
+            hasLiveUpdates = into.hasLiveUpdates || from.hasLiveUpdates,
+        )
+        tasks.remove(fromKey)
+    }
+
+    /** The key of the task [event] names by task id or tool-use id, or null when it is not tracked. */
+    private fun keyOf(event: BackgroundTaskEvent): String? {
+        keyByTaskId[event.taskId]?.let { if (it in tasks) return it }
+        val toolUseId = event.toolUseId ?: return null
+        val callKey = "call:$toolUseId"
+        return callKey.takeIf { it in tasks } ?: "task:${event.taskId}".takeIf { it in tasks }
+    }
+
+    /**
+     * The task this event names, creating one when the event arrives without a
+     * known start (an ended task in a session opened after it began). Progress
+     * never creates a task: it carries no title or start.
+     */
+    private fun link(event: BackgroundTaskEvent, at: Long): String? {
+        keyOf(event)?.let { key ->
+            if (tasks.getValue(key).taskId == null) tasks[key] = tasks.getValue(key).copy(taskId = event.taskId)
+            keyByTaskId[event.taskId] = key
+            return key
+        }
+        if (event.phase == BackgroundTaskPhase.Progress) return null
+        val key = "task:${event.taskId}"
+        if (key !in tasks) {
+            val description = event.description?.trim()?.takeIf { it.isNotEmpty() }
+            tasks[key] = BackgroundTask(
+                id = key,
+                kind = kindOfLive(event),
+                title = description ?: event.taskId,
+                startedAt = if (event.phase == BackgroundTaskPhase.Started) at else null,
+                taskId = event.taskId,
+                hasLiveUpdates = true,
+            )
+        }
+        keyByTaskId[event.taskId] = key
+        return key
+    }
+
+    /** Keep the call's own title; replace a placeholder (the task id) with the event's description. */
+    private fun betterTitle(task: BackgroundTask, description: String?): String {
+        if (description == null) return task.title
+        if (task.title.isBlank() || task.title == task.taskId) return description
+        return task.title
+    }
+
+    private fun kindOfLive(event: BackgroundTaskEvent): BackgroundTaskKind {
+        val type = event.taskType?.trim()?.lowercase()
+        if (!type.isNullOrEmpty()) {
+            return when {
+                type.contains("agent") || type.contains("subagent") -> BackgroundTaskKind.Subagent
+                type.contains("command") || type.contains("bash") || type.contains("shell") -> BackgroundTaskKind.Command
+                else -> BackgroundTaskKind.Other
+            }
+        }
+        return kindOfSummary(event.description)
+    }
+
+    private fun liveStatus(raw: String): BackgroundTaskStatus = when (raw.trim().lowercase()) {
+        "running", "pending", "paused" -> BackgroundTaskStatus.Running
+        "failed", "error", "errored" -> BackgroundTaskStatus.Failed
+        "killed", "stopped", "cancelled", "canceled", "aborted", "interrupted" -> BackgroundTaskStatus.Cancelled
+        else -> BackgroundTaskStatus.Completed
     }
 
     fun notify(notification: BackgroundTaskNotification, at: Long) {
@@ -246,7 +471,9 @@ internal class BackgroundTaskTracker {
             if (!anonymous.add(fingerprint)) return
         }
         val running = tasks.values.filter { it.isRunning }
-        val key = running.firstOrNull { it.matches(notification) }?.id ?: running.singleOrNull()?.id
+        val key = running.firstOrNull { it.matches(notification) }?.id
+            ?: running.filter { it.hasLiveUpdates }.singleOrNull()?.id
+            ?: running.singleOrNull()?.id
         if (key == null) {
             val created = fromNotification(notification, at)
             tasks[created.id] = created

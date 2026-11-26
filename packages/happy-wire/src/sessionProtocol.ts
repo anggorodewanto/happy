@@ -92,6 +92,51 @@ export const sessionStopEventSchema = z.object({
   t: z.literal('stop'),
 });
 
+/**
+ * A Claude Agent SDK background task, forwarded live: `task_started`,
+ * `task_progress`, `task_updated` and `task_notification` system messages.
+ * Additive and optional: consumers that do not know `t: 'task'` must skip the
+ * envelope, never render it. The CLI throttles `progress` (see
+ * sessionProtocolMapper.ts).
+ */
+export const sessionTaskPhaseSchema = z.enum(['started', 'progress', 'updated', 'notification']);
+export type SessionTaskPhase = z.infer<typeof sessionTaskPhaseSchema>;
+
+export const sessionTaskStatusSchema = z.enum([
+  'pending',
+  'running',
+  'completed',
+  'failed',
+  'killed',
+  'paused',
+  'stopped',
+  'cancelled',
+]);
+export type SessionTaskStatus = z.infer<typeof sessionTaskStatusSchema>;
+
+export const sessionTaskUsageSchema = z.object({
+  totalTokens: z.number().int().nonnegative().optional(),
+  toolUses: z.number().int().nonnegative().optional(),
+  durationMs: z.number().nonnegative().optional(),
+});
+export type SessionTaskUsage = z.infer<typeof sessionTaskUsageSchema>;
+
+export const sessionTaskEventSchema = z.object({
+  t: z.literal('task'),
+  phase: sessionTaskPhaseSchema,
+  taskId: z.string().min(1),
+  toolUseId: z.string().min(1).optional(),
+  description: z.string().optional(),
+  status: sessionTaskStatusSchema.optional(),
+  summary: z.string().optional(),
+  lastToolName: z.string().optional(),
+  usage: sessionTaskUsageSchema.optional(),
+  outputFile: z.string().optional(),
+  taskType: z.string().optional(),
+  isBackgrounded: z.boolean().optional(),
+});
+export type SessionTaskEvent = z.infer<typeof sessionTaskEventSchema>;
+
 export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionTextEventSchema,
   sessionServiceMessageEventSchema,
@@ -102,6 +147,7 @@ export const sessionEventSchema = z.discriminatedUnion('t', [
   sessionStartEventSchema,
   sessionTurnEndEventSchema,
   sessionStopEventSchema,
+  sessionTaskEventSchema,
 ]);
 
 export type SessionEvent = z.infer<typeof sessionEventSchema>;

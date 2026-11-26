@@ -20,6 +20,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.slopus.happy.chat.BackgroundTask
 import com.slopus.happy.chat.BackgroundTaskKind
 import com.slopus.happy.chat.BackgroundTaskStatus
+import com.slopus.happy.chat.endedWithSession
 import com.slopus.happy.ui.PHONE
 import com.slopus.happy.ui.assertDp
 import com.slopus.happy.ui.bounds
@@ -107,5 +108,32 @@ class BackgroundTaskBarTest {
         rule.node(BackgroundTaskTags.meta(finished.id)).assert(hasText("Failed", substring = true))
         rule.node(BackgroundTaskTags.detail(running.id)).assert(hasText("npm run build"))
         rule.node(BackgroundTaskTags.detail(finished.id)).assert(hasText("failed", substring = true))
+    }
+
+    @Test
+    fun aRunningTaskShowsItsLiveProgress() {
+        val live = running.copy(progress = "Running the tests", lastToolName = "Bash", toolUses = 12, durationMs = 80_000)
+        rule.setHappyContent {
+            Box(Modifier.fillMaxSize()) { BackgroundTaskSheet(listOf(live), onDismiss = {}) }
+        }
+        rule.node(BackgroundTaskTags.detail(live.id)).assert(hasText("Running the tests"))
+    }
+
+    @Test
+    fun aRunningTaskWithNoSummaryComposesItsProgressLine() {
+        val live = running.copy(lastToolName = "Bash", toolUses = 12, durationMs = 80_000)
+        rule.setHappyContent {
+            Box(Modifier.fillMaxSize()) { BackgroundTaskSheet(listOf(live), onDismiss = {}) }
+        }
+        rule.node(BackgroundTaskTags.detail(live.id)).assert(hasText("Bash · 12 tool uses · 1m20s"))
+    }
+
+    @Test
+    fun aTaskEndedWithItsSessionSaysSo() {
+        val ended = running.endedWithSession()
+        rule.setHappyContent {
+            Box(Modifier.fillMaxSize()) { BackgroundTaskSheet(listOf(ended), onDismiss = {}) }
+        }
+        rule.node(BackgroundTaskTags.meta(ended.id)).assert(hasText("Ended with session"))
     }
 }

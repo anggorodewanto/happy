@@ -41,6 +41,7 @@ import com.slopus.happy.R
 import com.slopus.happy.chat.BackgroundTask
 import com.slopus.happy.chat.BackgroundTaskStatus
 import com.slopus.happy.chat.backgroundTasksForDisplay
+import com.slopus.happy.chat.formatWorkDuration
 import com.slopus.happy.text.pluralResource
 import com.slopus.happy.ui.call.SheetStatusIcons
 import com.slopus.happy.ui.components.Icon
@@ -211,10 +212,11 @@ private fun BackgroundTaskRow(task: BackgroundTask, now: Long) {
                 style = BackgroundTaskSpec.rowMeta,
                 modifier = Modifier.testTag(BackgroundTaskTags.meta(task.id)),
             )
+            val progress = progressLine(task)
             val summary = task.summary?.takeIf { it.isNotBlank() }
-            val detail = summary ?: task.command
+            val detail = progress ?: summary ?: task.command
             if (detail != null) {
-                val command = summary == null
+                val command = progress == null && summary == null
                 Text(
                     text = detail,
                     color = colors.textSecondary,
@@ -250,6 +252,7 @@ private fun BackgroundTaskGlyph(task: BackgroundTask, modifier: Modifier = Modif
 /** "Running · 3 minutes ago" (or just the status when it never started here). */
 @Composable
 private fun metaLine(task: BackgroundTask, now: Long): String {
+    if (task.endedWithSession) return stringResource(R.string.chat_tasks_status_ended_with_session)
     val status = stringResource(
         when (task.status) {
             BackgroundTaskStatus.Running -> R.string.chat_tasks_status_running
@@ -262,6 +265,24 @@ private fun metaLine(task: BackgroundTask, now: Long): String {
     if (at == null) return status
     val ago = formatRelativeTime(LocalResources.current, at, now)
     return stringResource(R.string.chat_tasks_status_time, status, ago)
+}
+
+/**
+ * A running task's live line: the SDK's own progress summary, else
+ * "Bash · 12 tool uses · 2m5s" from its last tool, counters and duration.
+ */
+@Composable
+private fun progressLine(task: BackgroundTask): String? {
+    if (!task.isRunning) return null
+    task.progress?.takeIf { it.isNotBlank() }?.let { return it }
+    val parts = ArrayList<String>()
+    task.lastToolName?.takeIf { it.isNotBlank() }?.let(parts::add)
+    task.toolUses?.takeIf { it > 0 }?.let { count ->
+        parts.add(pluralResource(R.plurals.chat_tasks_tool_uses, count.toInt(), count.toInt()))
+    }
+    task.durationMs?.takeIf { it > 0 }?.let { parts.add(formatWorkDuration(it)) }
+    if (parts.isEmpty()) return null
+    return parts.joinToString(" · ")
 }
 
 private const val TASK_CLOCK_MS = 30_000L

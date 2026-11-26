@@ -26,9 +26,10 @@ import kotlinx.serialization.json.put
  * fail happy-app's schema is dropped, as happy-app drops it; so are the
  * control records happy-app never renders (turn-start, subagent start/stop,
  * ACP task lifecycle and token counts). A text record carrying background-task
- * notifications keeps them on [NormalizedMessage.taskNotifications]; one that
- * carried nothing else becomes [Body.Control], which the reducer reads without
- * drawing a row.
+ * notifications keeps them on [NormalizedMessage.taskNotifications]; a `task`
+ * event keeps its live SDK data on [NormalizedMessage.taskEvents]. A record
+ * that carried nothing else becomes [Body.Control], which the reducer reads
+ * without drawing a row.
  */
 object ChatNormalizer {
     private val json = Json { ignoreUnknownKeys = true }
@@ -110,8 +111,9 @@ object ChatNormalizer {
         // Send outcomes belong to the user message, not an assistant turn.
         val isReceipt = ev is SessionEvent.Accepted || ev is SessionEvent.Rejected
         // Agent envelopes carry a turn id; usage-only updates may arrive after
-        // turn-end, when the producer has no turn left to attach them to.
-        if (e.role == "agent" && e.turn == null && !isUsageOnlyServiceEvent && !isReceipt) return null
+        // turn-end, when the producer has no turn left to attach them to. A
+        // live background-task event is session-level, not a turn's.
+        if (e.role == "agent" && e.turn == null && !isUsageOnlyServiceEvent && !isReceipt && ev !is SessionEvent.Task) return null
 
         val parentUUID = e.subagent
         val isSidechain = parentUUID != null
@@ -121,14 +123,16 @@ object ChatNormalizer {
             turn: String? = e.turn,
             usage: UsageData? = e.usage,
             notifications: List<BackgroundTaskNotification> = emptyList(),
+            events: List<BackgroundTaskEvent> = emptyList(),
         ) =
             NormalizedMessage(
                 id = e.id, localId = localId, createdAt = e.time, body = body, isSidechain = sidechain,
-                meta = meta, usage = usage, turn = turn, taskNotifications = notifications,
+                meta = meta, usage = usage, turn = turn, taskNotifications = notifications, taskEvents = events,
             )
 
         return when (ev) {
             SessionEvent.TurnStart, SessionEvent.Start, SessionEvent.Stop -> null
+            is SessionEvent.Task -> message(Body.Control, sidechain = false, turn = null, usage = null, events = listOf(ev.event))
             is SessionEvent.Accepted ->
                 message(Body.Event(AgentEvent.UserMessageAccepted(ev.ref)), sidechain = false, turn = null, usage = null)
             is SessionEvent.Rejected ->
